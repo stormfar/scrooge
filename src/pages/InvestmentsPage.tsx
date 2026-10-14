@@ -41,7 +41,8 @@ import {
   updateAccount,
 } from '../lib/api';
 import { calibrate, daysSinceCheckIn, plannedAt, SUGGEST_AFTER_MONTHS, type Calibration } from '../lib/calibration';
-import type { AvailableChartColorsKeys } from '../lib/chartColors';
+import { accountColour } from '../lib/accountColours';
+import { getColorClassName } from '../lib/chartColors';
 import { EUR, EURExact, fmtDate, PCT } from '../lib/format';
 import { dayBefore } from '../lib/flows';
 import { balanceSplit } from '../lib/portion';
@@ -68,7 +69,6 @@ const SCENARIOS: { value: Scenario; label: string }[] = [
 type Horizon = '5' | '10' | '15' | '20' | '30';
 const HORIZONS: { value: Horizon; label: string }[] = ['5', '10', '15', '20', '30'].map((value) => ({ value: value as Horizon, label: `${value} years` }));
 const CHECK_IN_AFTER_DAYS = 31;
-const ACCOUNT_COLOURS: AvailableChartColorsKeys[] = ['blue', 'amber', 'violet', 'cyan', 'pink', 'lime', 'fuchsia', 'emerald', 'teal', 'sky'];
 const RISK_TONE = { low: 'text-emerald-600', medium: 'text-amber-600', high: 'text-destructive' } as const;
 
 export function InvestmentsPage() {
@@ -317,7 +317,6 @@ export function InvestmentsPage() {
   const end = points[points.length - 1];
 
   // All accounts: one stacked bar per account and year, and the money paid in as a line.
-  const names = source.map((account) => account.name);
   const allData = points.map((point) => ({
     when: point.label,
     ...Object.fromEntries(source.map((account) => [account.name, Math.round(point.byAccount[account.id] ?? 0)])),
@@ -364,7 +363,7 @@ export function InvestmentsPage() {
   ];
   const accountShown = oneSeries.visible(accountItems);
   const allItems: LegendItem[] = [
-    ...names.map((name, index) => ({ name, color: ACCOUNT_COLOURS[index % ACCOUNT_COLOURS.length] })),
+    ...source.map((account) => ({ name: account.name, color: accountColour(data.accounts, account.id) })),
     { name: 'Paid in', color: 'slate', line: true, dashed: true },
   ];
   const allBars = allSeries.visible(allItems.filter((item) => !item.line));
@@ -477,7 +476,10 @@ export function InvestmentsPage() {
                 return (
                   <TableRow key={account.id} className={cn('align-top', account.closedOn && 'opacity-60', selected?.id === account.id && 'bg-muted/50')}>
                     <TableCell className="whitespace-normal">
-                      <button type="button" className="text-left font-medium hover:underline" onClick={() => setSelectedId(account.id)}>{account.name}</button>
+                      <button type="button" className="inline-flex items-center gap-2 text-left font-medium hover:underline" onClick={() => setSelectedId(account.id)}>
+                        <span className={cn('size-2.5 shrink-0 rounded-full', getColorClassName(accountColour(data.accounts, account.id), 'bg'))} aria-hidden />
+                        {account.name}
+                      </button>
                       <div className="mt-1 flex flex-wrap gap-1">
                         <Badge variant="secondary">{info.label}</Badge>
                         {account.treatment === 'income' && <Badge variant="outline">pays income</Badge>}

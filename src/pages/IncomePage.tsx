@@ -21,6 +21,7 @@ import type { AvailableChartColorsKeys } from '../lib/chartColors';
 import { EUR, EURExact, fmtDate } from '../lib/format';
 import { grownMonthly } from '../lib/projection';
 import {
+  ageYears,
   grossFromRvEmployee,
   pensionKeepAfterSocial,
   zusatzRateFromPayslip,
@@ -190,7 +191,7 @@ export function IncomePage() {
           </p>
         ) : (
           <>
-            <IncomeSources finance={finance} path={base.path} included={included} scope={plan.request.scope} deflate={deflate} todays={todays} />
+            <IncomeSources finance={finance} path={base.path} included={included} scope={plan.request.scope} deflate={deflate} todays={todays} stopAges={base.agesAtRetirement} />
             <Card>
               <CardHeader>
                 <CardTitle>Where the money comes from</CardTitle>
@@ -367,6 +368,7 @@ function IncomeSources({
   scope,
   deflate,
   todays,
+  stopAges,
 }: {
   finance: FinanceData;
   path: PathYear[];
@@ -374,7 +376,14 @@ function IncomeSources({
   scope: 'individual' | 'household';
   deflate: (amount: number, yearOffset: number) => number;
   todays: boolean;
+  /** Age at which each person stops working in this plan. */
+  stopAges: Record<string, number>;
 }) {
+  // The path is sampled once a year, so start ages come from the plan's rules rather than the first sampled year.
+  const settings = finance.settings;
+  const selfBirth = finance.people.find((p) => p.id === 'self')?.birthDate ?? null;
+  const ageOn = (date: string) => (selfBirth ? ageYears(selfBirth, new Date(`${date}T00:00:00`)) : null);
+  const selfStop = stopAges.self ?? null;
   const retiredFrom = path.findIndex((point) => Object.keys(point.income.salary).length === 0);
   const afterStop = retiredFrom < 0 ? [] : path.slice(retiredFrom);
   const rows: SourceRow[] = [];
@@ -386,7 +395,7 @@ function IncomeSources({
     rows.push({
       key: `state-${person.id}`,
       label: `State pension, ${person.name}`,
-      startAge: point ? point.ages[person.id] : null,
+      startAge: point && stopAges[person.id] != null ? Math.max(stopAges[person.id], settings.earliestPensionAge) : null,
       monthly: point ? deflate(point.income.statePension[person.id], point.yearOffset) / 12 : 0,
       note: point ? `net, ${Math.round(keep * 100)}% of gross` : 'not reached in this plan',
     });
@@ -399,7 +408,7 @@ function IncomeSources({
     rows.push({
       key: account.id,
       label: account.name,
-      startAge: point ? point.ages.self ?? null : null,
+      startAge: point ? account.incomeStartAge ?? settings.regularPensionAge : null,
       monthly: point ? deflate(point.income.accounts[account.id], point.yearOffset) / 12 : (account.incomeMonthly ?? 0) * share,
       note: share < 1 ? `your ${Math.round(share * 100)}%` : 'as entered',
     });
@@ -410,7 +419,7 @@ function IncomeSources({
     rows.push({
       key: income.id,
       label: income.name,
-      startAge: point ? point.ages.self ?? null : null,
+      startAge: point && selfStop != null ? Math.max(selfStop, (income.startsOn ? ageOn(income.startsOn) : null) ?? 0) : null,
       monthly: point ? deflate(point.income.other[income.id], point.yearOffset) / 12 : 0,
       note: point ? (scope === 'individual' && income.owner === 'joint' ? 'half, as it is joint' : 'other income') : 'stops before you do',
     });
@@ -439,7 +448,7 @@ function IncomeSources({
             ))}
             <TableRow>
               <TableCell className="font-medium">Portfolio drawdown</TableCell>
-              <TableCell>{drawPoint ? Math.round(drawPoint.ages.self ?? drawPoint.yearOffset) : '—'}</TableCell>
+              <TableCell>{drawPoint && selfStop != null ? Math.round(selfStop) : '—'}</TableCell>
               <TableCell className="text-right tabular-nums">{drawPoint ? EURExact(deflate(drawPoint.income.portfolioDraw, drawPoint.yearOffset) / 12) : '—'}</TableCell>
               <TableCell className="text-xs text-muted-foreground">the rest of spending, in the first year</TableCell>
             </TableRow>

@@ -69,6 +69,12 @@ export const chartColors = {
     fill: "fill-slate-800",
     text: "text-slate-800",
   },
+  indigo: {
+    bg: "bg-indigo-500",
+    stroke: "stroke-indigo-500",
+    fill: "fill-indigo-500",
+    text: "text-indigo-500",
+  },
   sky: {
     bg: "bg-sky-300",
     stroke: "stroke-sky-300",

@@ -615,11 +615,15 @@ interface ComboChartProps extends React.HTMLAttributes<HTMLDivElement> {
   tooltipFooter?: (payload: PayloadItem[]) => { label: string; value: string }[]
   barSeries: ChartSeries & {
     type?: "default" | "stacked"
+    /** Scrooge: draw bars paler (0 to 1) so lines on top stay readable. */
+    opacity?: number
   }
   lineSeries?: ChartSeries & {
     connectNulls?: boolean
     /** Scrooge: categories drawn as a dashed line. */
     dashedCategories?: string[]
+    /** Scrooge: thicker lines with a white halo, for lines drawn over busy bars. */
+    emphasis?: boolean
   }
 }
 
@@ -1039,6 +1043,7 @@ const ComboChart = React.forwardRef<HTMLDivElement, ComboChartProps>(
                 dataKey={category}
                 stackId={stacked ? "stack" : undefined}
                 isAnimationActive={false}
+                fillOpacity={(barSeries as { opacity?: number }).opacity ?? 1}
                 fill=""
                 shape={(props: any) =>
                   renderShape(props, activeBar, activeLegend)
@@ -1175,7 +1180,8 @@ const ComboChart = React.forwardRef<HTMLDivElement, ComboChartProps>(
                 type="linear"
                 dataKey={category}
                 stroke=""
-                strokeWidth={2}
+                strokeWidth={(mergedLineSeries as { emphasis?: boolean }).emphasis ? 3 : 2}
+                style={(mergedLineSeries as { emphasis?: boolean }).emphasis ? { filter: "drop-shadow(0 0 1.5px white) drop-shadow(0 0 1.5px white)" } : undefined}
                 strokeLinejoin="round"
                 strokeLinecap="round"
                 isAnimationActive={false}
