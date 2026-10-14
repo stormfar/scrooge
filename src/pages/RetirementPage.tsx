@@ -17,7 +17,8 @@ import { useRetirementPlan } from '../hooks/useRetirementPlan';
 import { updatePerson, updateSettings } from '../lib/api';
 import { daysSinceCheckIn } from '../lib/calibration';
 import { balanceSplit } from '../lib/portion';
-import type { AvailableChartColorsKeys } from '../lib/chartColors';
+import { accountColour } from '../lib/accountColours';
+import { getColorClassName, type AvailableChartColorsKeys } from '../lib/chartColors';
 import { EUR, EURExact } from '../lib/format';
 import type { Pot } from '../lib/household';
 import {
@@ -28,7 +29,6 @@ import {
 } from '../lib/retirement';
 import { latestBalance, personName, selfShare, todayIso, type FinanceData, type HouseholdMode, type Person, type RetirementScope } from '../lib/types';
 
-const PART_COLOURS: AvailableChartColorsKeys[] = ['blue', 'amber', 'violet', 'cyan', 'pink', 'lime', 'fuchsia'];
 
 type CheckStatus = 'recorded' | 'estimate' | 'missing';
 type DataCheck = { label: string; status: CheckStatus; detail: string; weight: number };
@@ -107,7 +107,7 @@ export function RetirementPage() {
   const [salaryAnnual, setSalaryAnnual] = useState('');
   const [salarySave, setSalarySave] = useState('');
   const [money, setMoney] = useState<'nominal' | 'today'>('nominal');
-  const [showParts, setShowParts] = useState(false);
+  const [showParts, setShowParts] = useState(true);
   const [showCombined, setShowCombined] = useState(false);
   const [leftOut, setLeftOut] = useState<string[]>([]);
   const [confidenceOpen, setConfidenceOpen] = useState(false);
@@ -201,7 +201,7 @@ export function RetirementPage() {
   }));
   const bars = showCombined ? [...barKeys, 'Plus a year of pension'] : barKeys;
   const barColours: AvailableChartColorsKeys[] = [
-    ...(parts ? partIds.map((_, index) => PART_COLOURS[index % PART_COLOURS.length]) : ['blue' as AvailableChartColorsKeys]),
+    ...(parts ? partIds.map((id) => accountColour(finance.accounts, id)) : ['blue' as AvailableChartColorsKeys]),
     ...(showCombined ? ['gray' as AvailableChartColorsKeys] : []),
   ];
   const barItems: LegendItem[] = bars.map((name, index) => ({ name, color: barColours[index] }));
@@ -294,12 +294,12 @@ export function RetirementPage() {
           <CardHeader>
             <CardTitle>{played ? `Portfolio if you stop at ${wholeAge(chosenAge ?? 0)}` : base.ok ? 'Portfolio if you stop at that age' : 'Portfolio if you work until 70'}</CardTitle>
             <CardDescription>
-              Bars are the portfolio in today&apos;s euros (left axis), so inflation does not make the savings look larger. Lines are per year (right axis)
+              Bars are the portfolio in today&apos;s euros (left axis), so inflation does not make the savings look larger{parts ? '; each colour is an account, matching Investments' : ''}. Lines are per year (right axis)
               {chartInflation ? ', in the euros of that year, so spending rises.' : ", in today's euros, so spending stays flat."}
               {showCombined ? ' The grey top of each bar adds one year of pension: a balance plus a year of income, not a second pot.' : ''}
             </CardDescription>
             <CardAction className="flex gap-2">
-              <Button variant={showParts ? 'secondary' : 'outline'} size="sm" aria-pressed={showParts} onClick={() => setShowParts((on) => !on)}>Show the parts</Button>
+              <Button variant={showParts ? 'secondary' : 'outline'} size="sm" aria-pressed={showParts} onClick={() => setShowParts((on) => !on)}>By account</Button>
               <Button variant={showCombined ? 'secondary' : 'outline'} size="sm" aria-pressed={showCombined} onClick={() => setShowCombined((on) => !on)}>Add a year of pension</Button>
             </CardAction>
           </CardHeader>
@@ -312,8 +312,8 @@ export function RetirementPage() {
               xAxisLabel={`${selfName}'s age`}
               enableBiaxial
               showLegend={false}
-              barSeries={{ ...shownBars, type: 'stacked', valueFormatter: EUR, yAxisWidth: 80 }}
-              lineSeries={{ ...shownLines, valueFormatter: (value) => `${EUR(value)} / yr`, yAxisWidth: 100 }}
+              barSeries={{ ...shownBars, type: 'stacked', valueFormatter: EUR, yAxisWidth: 80, opacity: 0.45 }}
+              lineSeries={{ ...shownLines, valueFormatter: (value) => `${EUR(value)} / yr`, yAxisWidth: 100, emphasis: true }}
             />
             {planAccounts.length > 0 && (
               <fieldset className="grid gap-3 rounded-lg border p-3">
@@ -329,7 +329,12 @@ export function RetirementPage() {
                         key={account.id}
                         checked={included}
                         onChange={() => setLeftOut((current) => (included ? [...current, account.id] : current.filter((id) => id !== account.id)))}
-                        label={`${account.name}${account.owner === 'joint' && scope === 'individual' ? ', your share' : ''}`}
+                        label={(
+                          <span className="inline-flex items-center gap-2">
+                            <span className={cn('size-2.5 shrink-0 rounded-full', getColorClassName(accountColour(finance.accounts, account.id), 'bg'))} aria-hidden />
+                            {account.name}{account.owner === 'joint' && scope === 'individual' ? ', your share' : ''}
+                          </span>
+                        )}
                         hint={EURExact(balance)}
                       />
                     );
