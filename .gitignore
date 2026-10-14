@@ -1,0 +1,8 @@
+.DS_Store
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Your data never goes into git: the database, its backups and the CSV export all live here.
+# The app creates the folder and an empty database on first run.
+/data/
