@@ -13,6 +13,8 @@ import {
   ACCOUNT_TYPES,
   accountTypeInfo,
   LOCKED_TYPES,
+  PENSION_UNLOCK_AGE,
+  WITHDRAWAL_TAX,
   todayIso,
   type Account,
   type AccountTreatment,
@@ -59,6 +61,9 @@ export interface Draft {
   portionSelf: string;
   /** Could be taken out now without heavy tax or penalties. */
   accessible: boolean;
+  unlockAge: string;
+  costBasis: string;
+  withdrawalTaxPct: string;
   history: HistoryRow[];
 }
 
@@ -132,6 +137,9 @@ export function blankDraft(prefill?: Partial<Draft>): Draft {
     savedPortionBalance: '',
     portionSelf: '',
     accessible: !LOCKED_TYPES.includes(prefill?.type ?? 'etf'),
+    unlockAge: '',
+    costBasis: '',
+    withdrawalTaxPct: '',
     history: [],
     ...prefill,
   };
@@ -166,6 +174,9 @@ export function draftFromAccount(account: Account, balance: number | null, porti
     savedPortionBalance: portionBalance == null ? '' : String(portionBalance),
     portionSelf: account.portionSelf == null ? '' : String(account.portionSelf),
     accessible: account.accessible,
+    unlockAge: account.unlockAge == null ? '' : String(account.unlockAge),
+    costBasis: account.costBasis == null ? '' : String(account.costBasis),
+    withdrawalTaxPct: account.withdrawalTaxPct == null ? '' : String(account.withdrawalTaxPct),
     history: account.contributionHistory.map((period) => ({
       fromMonth: period.fromMonth,
       toMonth: period.toMonth ?? '',
@@ -229,6 +240,9 @@ export function toWrite(draft: Draft, includeBalance: boolean): AccountWrite {
     portionDate: draft.owner === 'joint' && draft.portionOn && draft.portionDate && draft.portionSelf.trim() !== '' ? draft.portionDate : null,
     portionSelf: draft.owner === 'joint' && draft.portionOn && draft.portionDate && draft.portionSelf.trim() !== '' ? num(draft.portionSelf) : null,
     accessible: draft.accessible,
+    unlockAge: draft.accessible ? null : optionalNum(draft.unlockAge),
+    costBasis: optionalNum(draft.costBasis),
+    withdrawalTaxPct: optionalNum(draft.withdrawalTaxPct),
     contributionHistory: historyToWrite(draft.history),
     ...(includeBalance ? { balance: num(draft.balance), balanceDate: draft.balanceDate || todayIso() } : {}),
   };
@@ -398,6 +412,29 @@ export function AccountEditor({
               checked={draft.accessible}
               onChange={(accessible) => onChange({ accessible })}
             />
+            <div className="grid gap-4 sm:grid-cols-3">
+              {!draft.accessible && draft.treatment === 'portfolio' && (
+                <FieldRow
+                  label="Available from age"
+                  hint={`When retirement can start drawing on it. Blank: ${LOCKED_TYPES.includes(draft.type) ? PENSION_UNLOCK_AGE : 'the regular pension age'}.`}
+                >
+                  <Input type="number" min="18" max="100" placeholder={LOCKED_TYPES.includes(draft.type) ? String(PENSION_UNLOCK_AGE) : ''} value={draft.unlockAge} onChange={(event) => onChange({ unlockAge: event.target.value })} />
+                </FieldRow>
+              )}
+              {draft.treatment === 'portfolio' && WITHDRAWAL_TAX[draft.type].kind === 'gains' && (
+                <FieldRow label="Paid in so far" hint="Of today's balance, what you put in. Only the rest is taxed as gains. Blank: assume no gains yet.">
+                  <Input type="number" min="0" step="0.01" value={draft.costBasis} onChange={(event) => onChange({ costBasis: event.target.value })} />
+                </FieldRow>
+              )}
+              {draft.treatment === 'portfolio' && (
+                <FieldRow
+                  label={WITHDRAWAL_TAX[draft.type].kind === 'payout' ? 'Tax on payouts %' : 'Tax on gains %'}
+                  hint={WITHDRAWAL_TAX[draft.type].kind === 'none' ? 'Usually tax-free. Blank keeps it at 0.' : `Blank uses ${WITHDRAWAL_TAX[draft.type].pct}% for this type, a rough German default.`}
+                >
+                  <Input type="number" min="0" max="100" step="0.01" placeholder={String(WITHDRAWAL_TAX[draft.type].pct)} value={draft.withdrawalTaxPct} onChange={(event) => onChange({ withdrawalTaxPct: event.target.value })} />
+                </FieldRow>
+              )}
+            </div>
             <FieldRow label="Notes">
               <Textarea value={draft.notes} onChange={(event) => onChange({ notes: event.target.value })} rows={2} />
             </FieldRow>

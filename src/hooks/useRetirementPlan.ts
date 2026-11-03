@@ -8,7 +8,7 @@ import {
 } from '../lib/retirement';
 import { monthsBetween } from '../lib/calibration';
 import { balanceSplit } from '../lib/portion';
-import { latestBalance, todayIso, type FinanceData, type Person } from '../lib/types';
+import { SAVER_ALLOWANCE, latestBalance, todayIso, unlockAgeOf, withdrawalTaxOf, type FinanceData, type Person } from '../lib/types';
 
 export function pensionOf(person: Person): PensionFields {
   return {
@@ -79,6 +79,11 @@ export function planRequest(finance: FinanceData, leftOut: string[] = [], now = 
       closed: Boolean(account.closedOn),
       ownerShare: account.ownerShare,
       balanceShare: balanceSplit(account, finance.balances).share,
+      unlockAge: unlockAgeOf(account, finance.settings.regularPensionAge),
+      taxKind: withdrawalTaxOf(account).kind,
+      taxPct: withdrawalTaxOf(account).pct,
+      costBasis: account.costBasis,
+      risk: account.risk,
     })),
     otherIncomes: finance.incomes.map((income) => ({
       id: income.id,
@@ -90,6 +95,7 @@ export function planRequest(finance: FinanceData, leftOut: string[] = [], now = 
     })),
     scope,
     spendingMonthly: spending.totalMonthly,
+    taxAllowanceAnnual: SAVER_ALLOWANCE * (scope === 'household' ? 2 : 1),
     assumptions: {
       inflationPct: finance.settings.inflationPct,
       horizonAge: finance.settings.horizonAge,

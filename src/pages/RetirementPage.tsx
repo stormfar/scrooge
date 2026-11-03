@@ -28,6 +28,7 @@ import {
   type ScenarioResult,
 } from '../lib/retirement';
 import { latestBalance, personName, selfShare, todayIso, type FinanceData, type HouseholdMode, type Person, type RetirementScope } from '../lib/types';
+import { MarketRisk } from '../components/MarketRisk';
 
 
 type CheckStatus = 'recorded' | 'estimate' | 'missing';
@@ -257,6 +258,13 @@ export function RetirementPage() {
               spendingMonthly={chartInflation ? inflateMonthly(spending.totalMonthly, finance.settings.inflationPct, yearsOut) : spending.totalMonthly}
               spendingLabel={chartInflation ? 'spending / month at that age' : "spending / month, today's euros"}
             />
+            {base.reason !== 'missing-birth' && (
+              <MarketRisk
+                request={salaryScenario?.request ?? model.request}
+                stopAge={base.ok ? base.agesAtRetirement.self ?? null : null}
+                horizon={finance.settings.horizonAge}
+              />
+            )}
             {played && me?.birthDate && (
               <p className="text-sm text-muted-foreground">Age {wholeAge(chosenAge ?? 0)} is {calendarWhen(me.birthDate, chosenAge ?? 0)}. Clear the retire box to go back to the earliest age.</p>
             )}
@@ -754,6 +762,12 @@ function Headline({
         ))}
       </div>
       {!chosen && (spread || band) && <p className="text-sm text-muted-foreground">{spread}{band}</p>}
+      {!base.ok && base.lockedAtRunOut > 0 && (
+        <p className="text-sm text-destructive">
+          At that point {EUR(base.lockedAtRunOut)} is still in pension accounts that can&apos;t be drawn yet. Set when each opens under
+          &ldquo;Available from age&rdquo; in the account (Investments → Edit).
+        </p>
+      )}
     </div>
   );
 }

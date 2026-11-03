@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import Database from 'better-sqlite3';
 import {
@@ -37,7 +37,9 @@ function serializeCsv(headers: string[], rows: Record<string, string | number>[]
 }
 
 export class FinanceError extends Error {
-  readonly status = 400;
+  constructor(message: string, readonly status = 400) {
+    super(message);
+  }
 }
 
 interface PersonRow {
@@ -83,6 +85,9 @@ interface AccountRow {
   portion_date: string | null;
   portion_self: number | null;
   accessible: number;
+  unlock_age: number | null;
+  cost_basis: number | null;
+  withdrawal_tax_pct: number | null;
 }
 
 interface IncomeRow {
@@ -287,6 +292,9 @@ function mapAccount(row: AccountRow): Account {
     portionDate: row.owner === 'joint' ? row.portion_date : null,
     portionSelf: row.owner === 'joint' ? row.portion_self : null,
     accessible: row.accessible !== 0,
+    unlockAge: row.unlock_age ?? null,
+    costBasis: row.cost_basis ?? null,
+    withdrawalTaxPct: row.withdrawal_tax_pct ?? null,
     contributionHistory: [],
   };
 }
@@ -659,6 +667,47 @@ function migrate(db: Database.Database) {
     });
     run();
   }
+  if (version < 10) {
+    const run = db.transaction(() => {
+      db.exec(`
+        ALTER TABLE accounts ADD COLUMN unlock_age REAL CHECK (unlock_age IS NULL OR (unlock_age >= 18 AND unlock_age <= 100));
+        ALTER TABLE accounts ADD COLUMN cost_basis REAL CHECK (cost_basis IS NULL OR cost_basis >= 0);
+        ALTER TABLE accounts ADD COLUMN withdrawal_tax_pct REAL CHECK (withdrawal_tax_pct IS NULL OR (withdrawal_tax_pct >= 0 AND withdrawal_tax_pct <= 100));
+      `);
+      db.pragma('user_version = 10');
+    });
+    run();
+  }
+}
+
+export const SCHEMA_VERSION = 10;
+/** Keep this many automatic backups in data/backups/. */
+export const BACKUPS_KEPT = 30;
+
+function backupStamp(now: Date): string {
+  return now.toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-');
+}
+
+export function listBackups(dir: string): string[] {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir).filter((f) => /^scrooge-.*\.sqlite$/.test(f)).sort().reverse();
+}
+
+/** A consistent copy of the live database (safe while the app runs). Keeps the newest BACKUPS_KEPT. */
+export function backupDb(db: Database.Database, dir: string, reason: string, now = new Date()): string {
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, `scrooge-${backupStamp(now)}-${reason}.sqlite`);
+  if (existsSync(file)) unlinkSync(file);
+  db.prepare('VACUUM INTO ?').run(file);
+  for (const old of listBackups(dir).slice(BACKUPS_KEPT)) unlinkSync(join(dir, old));
+  return file;
+}
+
+/** Back up once a day, on the first open or write of that day. */
+export function dailyBackup(db: Database.Database, dir: string, now = new Date()): string | null {
+  const day = backupStamp(now).slice(0, 8);
+  if (listBackups(dir).some((f) => f.startsWith(`scrooge-${day}`))) return null;
+  return backupDb(db, dir, 'daily', now);
 }
 
 interface PeriodRow {
@@ -709,12 +758,31 @@ function writeHistory(db: Database.Database, accountId: string, periods: Contrib
   for (const period of periods) insert.run(accountId, period.fromMonth, period.toMonth, period.amountMonthly, period.note);
 }
 
-export function openDb(dbPath: string): Database.Database {
+export interface OpenOptions {
+  /** Where automatic backups go. Defaults to a backups/ folder next to the database. */
+  backupDir?: string;
+  now?: Date;
+}
+
+/**
+ * Open (or create) the database. An existing database is copied to the backup folder before any schema
+ * upgrade and once a day. A database written by a newer version of the app is refused rather than touched.
+ */
+export function openDb(dbPath: string, options: OpenOptions = {}): Database.Database {
   mkdirSync(dirname(dbPath), { recursive: true });
+  const existed = existsSync(dbPath);
   const db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
+  const backupDir = options.backupDir ?? join(dirname(dbPath), 'backups');
+  const version = Number(db.pragma('user_version', { simple: true }));
+  if (version > SCHEMA_VERSION) {
+    db.close();
+    throw new Error(`${dbPath} was written by a newer version of Scrooge (schema ${version}, this code knows ${SCHEMA_VERSION}). Update the code first.`);
+  }
+  if (existed && version > 0 && version < SCHEMA_VERSION) backupDb(db, backupDir, `before-v${SCHEMA_VERSION}`, options.now);
   migrate(db);
+  if (existed) dailyBackup(db, backupDir, options.now);
   return db;
 }
 
@@ -785,6 +853,12 @@ function normalizeAccount(input: AccountWrite, existing?: Account): Omit<Account
     : optionalNumber(input.portionSelf === undefined ? existing?.portionSelf : input.portionSelf, 'Your part');
   if (portionDate && portionSelfRaw == null) fail('Your part of the balance is needed with a portion date');
   const portionSelf = portionSelfRaw == null ? null : inRange(portionSelfRaw, 'Your part', 0, 1_000_000_000);
+  const unlockAge = optionalNumber(input.unlockAge === undefined ? existing?.unlockAge : input.unlockAge, 'Available from age');
+  if (unlockAge != null) inRange(unlockAge, 'Available from age', 18, 100);
+  const costBasis = optionalNumber(input.costBasis === undefined ? existing?.costBasis : input.costBasis, 'Paid in');
+  if (costBasis != null) inRange(costBasis, 'Paid in', 0, 1_000_000_000);
+  const withdrawalTaxPct = optionalNumber(input.withdrawalTaxPct === undefined ? existing?.withdrawalTaxPct : input.withdrawalTaxPct, 'Tax on withdrawals');
+  if (withdrawalTaxPct != null) inRange(withdrawalTaxPct, 'Tax on withdrawals', 0, 100);
   return {
     owner,
     name,
@@ -809,6 +883,9 @@ function normalizeAccount(input: AccountWrite, existing?: Account): Omit<Account
     accessible: input.accessible == null
       ? existing?.accessible ?? !LOCKED_TYPES.includes(type)
       : Boolean(input.accessible),
+    unlockAge,
+    costBasis,
+    withdrawalTaxPct,
     contributionHistory: input.contributionHistory === undefined
       ? existing?.contributionHistory ?? []
       : normalizeHistory(input.contributionHistory),
@@ -820,8 +897,8 @@ function insertAccount(db: Database.Database, id: string, account: Omit<Account,
     id, owner, name, type, opened_on, monthly_contribution, contribution_growth_pct,
     contribution_increase_kind, contribution_increase_value, contribution_increase_every,
     expected_return_pct, interest_rate_pct, risk, notes, closed_on, treatment, income_monthly, income_start_age,
-    owner_share, portion_date, portion_self, accessible
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    owner_share, portion_date, portion_self, accessible, unlock_age, cost_basis, withdrawal_tax_pct
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
     id,
     account.owner,
     account.name,
@@ -844,6 +921,9 @@ function insertAccount(db: Database.Database, id: string, account: Omit<Account,
     account.portionDate,
     account.portionSelf,
     account.accessible ? 1 : 0,
+    account.unlockAge,
+    account.costBasis,
+    account.withdrawalTaxPct,
   );
 }
 
@@ -883,7 +963,8 @@ export function updateAccount(db: Database.Database, id: string, input: Partial<
     owner = ?, name = ?, type = ?, opened_on = ?, monthly_contribution = ?, contribution_growth_pct = ?,
     contribution_increase_kind = ?, contribution_increase_value = ?, contribution_increase_every = ?,
     expected_return_pct = ?, interest_rate_pct = ?, risk = ?, notes = ?, closed_on = ?, treatment = ?,
-    income_monthly = ?, income_start_age = ?, owner_share = ?, portion_date = ?, portion_self = ?, accessible = ?
+    income_monthly = ?, income_start_age = ?, owner_share = ?, portion_date = ?, portion_self = ?, accessible = ?,
+    unlock_age = ?, cost_basis = ?, withdrawal_tax_pct = ?
     WHERE id = ?`).run(
     account.owner,
     account.name,
@@ -906,6 +987,9 @@ export function updateAccount(db: Database.Database, id: string, input: Partial<
     account.portionDate,
     account.portionSelf,
     account.accessible ? 1 : 0,
+    account.unlockAge,
+    account.costBasis,
+    account.withdrawalTaxPct,
     id,
   );
   if (input.contributionHistory !== undefined) writeHistory(db, id, account.contributionHistory);
@@ -1106,7 +1190,7 @@ export function exportFinanceCsv(db: Database.Database, dir: string): string[] {
     payslip_zusatz_rate_pct: person.payslipZusatzRatePct ?? '',
     personal_allowance_monthly: person.personalAllowanceMonthly ?? '',
   })));
-  write('accounts.csv', ['id', 'owner', 'name', 'type', 'opened_on', 'monthly_contribution', 'contribution_growth_pct', 'contribution_increase_kind', 'contribution_increase_value', 'contribution_increase_every', 'expected_return_pct', 'interest_rate_pct', 'risk', 'notes', 'closed_on', 'treatment', 'income_monthly', 'income_start_age', 'owner_share', 'portion_date', 'portion_self', 'accessible'], data.accounts.map((account) => ({
+  write('accounts.csv', ['id', 'owner', 'name', 'type', 'opened_on', 'monthly_contribution', 'contribution_growth_pct', 'contribution_increase_kind', 'contribution_increase_value', 'contribution_increase_every', 'expected_return_pct', 'interest_rate_pct', 'risk', 'notes', 'closed_on', 'treatment', 'income_monthly', 'income_start_age', 'owner_share', 'portion_date', 'portion_self', 'accessible', 'unlock_age', 'cost_basis', 'withdrawal_tax_pct'], data.accounts.map((account) => ({
     id: account.id,
     owner: account.owner,
     name: account.name,
@@ -1129,6 +1213,9 @@ export function exportFinanceCsv(db: Database.Database, dir: string): string[] {
     portion_date: account.portionDate ?? '',
     portion_self: account.portionSelf ?? '',
     accessible: account.accessible ? 1 : 0,
+    unlock_age: account.unlockAge ?? '',
+    cost_basis: account.costBasis ?? '',
+    withdrawal_tax_pct: account.withdrawalTaxPct ?? '',
   })));
   write('balances.csv', ['id', 'account_id', 'date', 'balance', 'contributed', 'note'], data.balances.map((balance) => ({
     id: balance.id,

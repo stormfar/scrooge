@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  SCHEMA_VERSION,
   addBalance,
   addBalances,
   createAccount,
@@ -105,7 +106,7 @@ describe('finance database', () => {
     expect(payslip.payslipZusatzRatePct).toBe(2.5);
     expect(loadFinance(db).settings.contributionCapMonthly).toBe(8450);
     expect(loadFinance(db).settings.pensionTaxKeep).toBe(0.9);
-    expect(Number(db.pragma('user_version', { simple: true }))).toBe(9);
+    expect(Number(db.pragma('user_version', { simple: true }))).toBe(SCHEMA_VERSION);
     db.close();
   });
 
@@ -161,7 +162,7 @@ describe('finance database', () => {
 
     const db = openDb(path);
     const data = loadFinance(db);
-    expect(Number(db.pragma('user_version', { simple: true }))).toBe(9);
+    expect(Number(db.pragma('user_version', { simple: true }))).toBe(SCHEMA_VERSION);
     expect(data.people.map((person) => [person.id, person.name])).toEqual([['self', 'Alex'], ['partner', 'Sam']]);
     expect(data.accounts.map((account) => [account.name, account.owner, account.ownerShare])).toEqual([
       ['Her ETF', 'partner', 0],

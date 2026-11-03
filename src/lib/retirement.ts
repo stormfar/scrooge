@@ -13,9 +13,17 @@
  *
  * Spending is inflated. Investment returns are nominal. The earliest age is the first one where the portfolio
  * never falls below zero before the horizon. Household mode stops both people in the same year.
+ *
+ * Drawdown
+ * - Spending not covered by pensions and income comes out of the accounts that can be drawn at that age, in
+ *   proportion to their balances. An account with an unlockAge (a pension policy) can't be touched before its
+ *   owner reaches that age: if the other accounts run dry first, the plan fails even though money is still locked.
+ * - Withdrawals are grossed up for tax: on the gain part (balance above what was paid in) for kind 'gains',
+ *   with a yearly tax-free allowance, or on the whole amount for kind 'payout'. Accounts without tax fields
+ *   are untaxed, so the solver stays usable on its own.
  */
 
-import { selfShare } from './types';
+import { selfShare, type Risk, type WithdrawalTaxKind } from './types';
 import { adjustAccounts, grownMonthly, increaseFrom, monthlyRate, type PaymentIncrease, type ProjectAccount } from './projection';
 
 export interface PensionFields {
@@ -97,6 +105,15 @@ export interface RetirementAccount {
   ownerShare?: number;
   /** Your fraction of today's balance when it differs from ownerShare, for example money you put in before it became joint. */
   balanceShare?: number;
+  /** The owner's age from which this account can be drawn. Null or missing: any time. */
+  unlockAge?: number | null;
+  /** Tax when money comes out. Missing: none. */
+  taxKind?: WithdrawalTaxKind;
+  taxPct?: number;
+  /** What was paid in of today's balance, for tax on gains. Null or missing: all of it (no gains yet). */
+  costBasis?: number | null;
+  /** Used to pick a volatility for simulated markets. */
+  risk?: Risk;
 }
 
 export interface RetirementPersonInput {
@@ -148,6 +165,8 @@ export interface SolveRequest {
   now?: Date;
   returnDeltaPct?: number;
   extraMonthly?: number;
+  /** Tax-free capital gains per year for everyone in scope (Sparerpauschbetrag). */
+  taxAllowanceAnnual?: number;
 }
 
 export interface PathYear {
@@ -158,6 +177,8 @@ export interface PathYear {
   byAccount: Record<string, number>;
   spendingAnnual: number;
   pensionAnnual: number;
+  /** Tax paid on withdrawals this year (on top of portfolioDraw). */
+  withdrawalTaxAnnual: number;
   /** Where the money comes from this year, nominal euros per year. Sums to at most spending once work stops. */
   income: IncomeBreakdown;
 }
@@ -186,6 +207,8 @@ export interface ScenarioResult {
   /** Net state pension at the claim date, in today's euros (before later pension growth). */
   statePensionNetMonthly: number;
   otherIncomeMonthly: number;
+  /** When the plan ran out: money still in accounts that could not be drawn yet (nominal euros). */
+  lockedAtRunOut: number;
 }
 
 export interface SensitivityRow {
@@ -304,15 +327,23 @@ function isDrawdown(account: RetirementAccount): boolean {
   return !(account.treatment === 'income' && (account.incomeMonthly ?? 0) > 0);
 }
 
-interface SimResult {
+export interface SimResult {
   ok: boolean;
   runsOutAge: number | null;
   path: PathYear[];
   statePensionNetMonthly: number;
   otherIncomeMonthly: number;
+  lockedAtRunOut: number;
 }
 
-function simulate(req: SolveRequest, people: RetirementPersonInput[], stopOffset: number, now: Date): SimResult {
+export interface SimOptions {
+  /** Annual return in percent for drawdown account i in year y (0 = the first 12 months). Default: its expected return. */
+  returns?: (index: number, year: number, expectedPct: number, risk: Risk) => number;
+  /** Skip the yearly path (faster, for many simulations). */
+  lean?: boolean;
+}
+
+function simulate(req: SolveRequest, people: RetirementPersonInput[], stopOffset: number, now: Date, opts: SimOptions = {}): SimResult {
   const assumptions = req.assumptions;
   const accounts = req.accounts.map((account) => {
     const share = req.scope === 'individual' ? selfShare(account) : 1;
@@ -321,6 +352,7 @@ function simulate(req: SolveRequest, people: RetirementPersonInput[], stopOffset
     return {
       ...account,
       balance: account.balance * balanceShare,
+      costBasis: account.costBasis == null ? account.costBasis : account.costBasis * balanceShare,
       monthlyContribution: account.monthlyContribution * share,
       incomeMonthly: account.incomeMonthly == null ? null : account.incomeMonthly * share,
     };
@@ -353,6 +385,19 @@ function simulate(req: SolveRequest, people: RetirementPersonInput[], stopOffset
     { extraMonthly: req.extraMonthly, returnDeltaPct: req.returnDeltaPct },
   );
   const state = adjusted.map((account) => ({ ...account }));
+  const meta = portfolioAccounts.map((account) => ({
+    owner: account.owner,
+    unlockAge: account.unlockAge ?? null,
+    taxKind: account.taxKind ?? 'none',
+    taxRate: Math.max(0, Math.min(100, account.taxPct ?? 0)) / 100,
+    risk: account.risk ?? 'medium',
+  }));
+  const basis = state.map((account, i) => {
+    const paid = portfolioAccounts[i].costBasis;
+    return paid == null ? Math.max(0, account.balance) : Math.max(0, paid);
+  });
+  const allowanceAnnual = Math.max(0, req.taxAllowanceAnnual ?? 0);
+  let allowanceLeft = allowanceAnnual;
 
   const incomeAccounts = accounts.filter((account) => {
     if (isDrawdown(account)) return false;
@@ -433,7 +478,8 @@ function simulate(req: SolveRequest, people: RetirementPersonInput[], stopOffset
   const portfolioOf = () => state.reduce((sum, account) => sum + account.balance, 0);
   const path: PathYear[] = [];
   const yearly = (record: Record<string, number>) => Object.fromEntries(Object.entries(record).map(([key, value]) => [key, value * 12]));
-  const snapshot = (month: number, money: ReturnType<typeof monthMoney>, drawMonthly: number, working: boolean, salaryMonth: number) => {
+  const snapshot = (month: number, money: ReturnType<typeof monthMoney>, drawMonthly: number, working: boolean, salaryMonth: number, taxMonthly = 0) => {
+    if (opts.lean) return;
     const yearOffset = month / 12;
     const ages: Record<string, number> = {};
     for (const person of people) ages[person.id] = agesNow[person.id] + yearOffset;
@@ -444,6 +490,7 @@ function simulate(req: SolveRequest, people: RetirementPersonInput[], stopOffset
       byAccount: Object.fromEntries(state.map((account) => [account.id, account.balance])),
       spendingAnnual: money.spending * 12,
       pensionAnnual: money.pension * 12,
+      withdrawalTaxAnnual: taxMonthly * 12,
       income: {
         salary: working ? yearly(salaryAt(salaryMonth)) : {},
         statePension: yearly(money.statePension),
@@ -460,31 +507,69 @@ function simulate(req: SolveRequest, people: RetirementPersonInput[], stopOffset
 
   let ok = true;
   let runsOutAge: number | null = null;
+  let lockedAtRunOut = 0;
   for (let month = 0; month < months; month++) {
     const yearOffset = month / 12;
     const money = monthMoney(yearOffset);
     const { spending, pension } = money;
     const working = yearOffset < stopOffset - 1e-9;
-    for (const account of state) {
+    if (month % 12 === 0) allowanceLeft = allowanceAnnual;
+    const year = Math.floor(month / 12);
+    state.forEach((account, i) => {
       const contribution = working && !account.closed
         ? grownMonthly(account.monthlyContribution, increaseFrom(account), month)
         : 0;
-      account.balance = account.balance * (1 + monthlyRate(account.annualReturnPct)) + contribution;
+      const annual = opts.returns ? opts.returns(i, year, account.annualReturnPct, meta[i].risk) : account.annualReturnPct;
+      account.balance = account.balance * (1 + monthlyRate(annual)) + contribution;
+      basis[i] += contribution;
+    });
+    const need = working ? 0 : Math.max(0, spending - pension);
+    let tax = 0;
+    if (need > 0) {
+      const open: number[] = [];
+      let openTotal = 0;
+      state.forEach((account, i) => {
+        const unlock = meta[i].unlockAge;
+        if (account.balance <= 0) return;
+        if (unlock != null && ownerAge(meta[i].owner) + yearOffset + 1e-9 < unlock) return;
+        open.push(i);
+        openTotal += account.balance;
+      });
+      // Per euro taken out: payout tax (p), gains tax before the allowance (a) and the taxable gain (g).
+      let p = 0;
+      let a = 0;
+      let g = 0;
+      for (const i of open) {
+        const w = state[i].balance / openTotal;
+        if (meta[i].taxKind === 'payout') p += w * meta[i].taxRate;
+        else if (meta[i].taxKind === 'gains') {
+          const gain = Math.max(0, 1 - basis[i] / state[i].balance);
+          a += w * gain * meta[i].taxRate;
+          g += w * gain;
+        }
+      }
+      let gross = p < 1 ? need / (1 - p) : Infinity;
+      if (g * gross > allowanceLeft && 1 - p - a > 0) {
+        const avgRate = g > 0 ? a / g : 0;
+        gross = (need - avgRate * allowanceLeft) / (1 - p - a);
+      } else if (g * gross > allowanceLeft) gross = Infinity;
+      if (!(gross <= openTotal + 0.01)) {
+        ok = false;
+        runsOutAge = (agesNow[primary.id] ?? 0) + yearOffset;
+        lockedAtRunOut = state.reduce((sum, account, i) => sum + (open.includes(i) ? 0 : Math.max(0, account.balance)), 0);
+        for (const i of open) state[i].balance = 0;
+        snapshot(month + 1, money, need, working, month);
+        break;
+      }
+      allowanceLeft = Math.max(0, allowanceLeft - g * gross);
+      for (const i of open) {
+        const draw = gross * (state[i].balance / openTotal);
+        basis[i] *= 1 - draw / state[i].balance;
+        state[i].balance -= draw;
+      }
+      tax = gross - need;
     }
-    const withdrawal = working ? 0 : Math.max(0, spending - pension);
-    const total = portfolioOf();
-    if (withdrawal > total + 0.01) {
-      ok = false;
-      runsOutAge = (agesNow[primary.id] ?? 0) + yearOffset;
-      for (const account of state) account.balance = 0;
-      snapshot(month + 1, money, withdrawal, working, month);
-      break;
-    }
-    if (withdrawal > 0 && total > 0) {
-      const keep = (total - withdrawal) / total;
-      for (const account of state) account.balance *= keep;
-    }
-    if ((month + 1) % 12 === 0 || month + 1 === months) snapshot(month + 1, money, withdrawal, working, month);
+    if ((month + 1) % 12 === 0 || month + 1 === months) snapshot(month + 1, money, need, working, month, tax);
   }
 
   let statePensionNetMonthly = 0;
@@ -493,7 +578,25 @@ function simulate(req: SolveRequest, people: RetirementPersonInput[], stopOffset
   let otherIncomeMonthly = 0;
   for (const account of incomeAccounts) otherIncomeMonthly += account.incomeMonthly ?? 0;
 
-  return { ok, runsOutAge, path, statePensionNetMonthly, otherIncomeMonthly };
+  return { ok, runsOutAge, path, statePensionNetMonthly, otherIncomeMonthly, lockedAtRunOut };
+}
+
+/** Run the plan once with work stopping at `stopAge` (the primary person's age). Null when a birth date is missing. */
+export function simulateAtAge(req: SolveRequest, stopAge: number, opts: SimOptions = {}): SimResult | null {
+  const now = req.now ?? new Date();
+  const people = includedPeople(req);
+  if (!people.length || people.some((person) => !person.birthDate)) return null;
+  const primary = people.find((person) => person.id === 'self') ?? people[0];
+  const stopOffset = Math.max(0, stopAge - ageYears(primary.birthDate as string, now));
+  return simulate(req, people, stopOffset, now, opts);
+}
+
+/** The primary person's age today, or null without a birth date. */
+export function primaryAgeNow(req: SolveRequest): number | null {
+  const people = includedPeople(req);
+  const primary = people.find((person) => person.id === 'self') ?? people[0];
+  if (!primary?.birthDate) return null;
+  return ageYears(primary.birthDate, req.now ?? new Date());
 }
 
 export function retirementAtAge(req: SolveRequest, stopAge: number): ScenarioResult {
@@ -515,6 +618,7 @@ export function retirementAtAge(req: SolveRequest, stopAge: number): ScenarioRes
     path: sim.path,
     statePensionNetMonthly: sim.statePensionNetMonthly,
     otherIncomeMonthly: sim.otherIncomeMonthly,
+    lockedAtRunOut: sim.ok ? 0 : sim.lockedAtRunOut,
   };
 }
 
@@ -529,6 +633,7 @@ function missingBirth(missing: RetirementPersonInput | undefined): ScenarioResul
     path: [],
     statePensionNetMonthly: 0,
     otherIncomeMonthly: 0,
+    lockedAtRunOut: 0,
   };
 }
 
@@ -565,6 +670,7 @@ export function earliestRetirement(req: SolveRequest): ScenarioResult {
     path: sim.path,
     statePensionNetMonthly: sim.statePensionNetMonthly,
     otherIncomeMonthly: sim.otherIncomeMonthly,
+    lockedAtRunOut: stopOffset == null ? sim.lockedAtRunOut : 0,
   };
 }
 
