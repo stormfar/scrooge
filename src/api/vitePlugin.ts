@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import {
   addBalance,
   addBalances,
+  dailyBackup,
   createAccount,
   createIncome,
   deleteAccount,
@@ -30,17 +31,34 @@ function json(res: ServerResponse, status: number, body: unknown) {
   res.end(JSON.stringify(body));
 }
 
+/**
+ * Only this app's own page may call the API. Another website can send requests to localhost while the dev
+ * server runs; the browser marks those with its Origin, which is refused here.
+ */
+export function isSameOrigin(req: IncomingMessage): boolean {
+  const origin = req.headers.origin;
+  if (!origin) return true;
+  try {
+    return new URL(origin).host === req.headers.host;
+  } catch {
+    return false;
+  }
+}
+
 async function readJson<T>(req: IncomingMessage): Promise<T> {
+  if (!(req.headers['content-type'] ?? '').includes('application/json')) throw new FinanceError('Send JSON', 415);
   const chunks: Buffer[] = [];
   for await (const chunk of req) chunks.push(Buffer.from(chunk));
   return JSON.parse(Buffer.concat(chunks).toString('utf8')) as T;
 }
 
 let database: ReturnType<typeof openDb> | null = null;
+// SCROOGE_BACKUP_DIR keeps backups somewhere else, for example a synced folder.
+const BACKUP_DIR = process.env.SCROOGE_BACKUP_DIR || join(DATA_DIR, 'backups');
 
 function db(): ReturnType<typeof openDb> {
   // SCROOGE_DB points the app at another file, for trying things without touching the real one.
-  if (!database) database = openDb(process.env.SCROOGE_DB || join(DATA_DIR, 'scrooge.sqlite'));
+  if (!database) database = openDb(process.env.SCROOGE_DB || join(DATA_DIR, 'scrooge.sqlite'), { backupDir: BACKUP_DIR });
   return database;
 }
 
@@ -52,9 +70,13 @@ export function createApiMiddleware(): Connect.NextHandleFunction {
     const balanceMatch = pathname.match(/^\/api\/balances\/(\d+)$/);
     const personMatch = pathname.match(/^\/api\/people\/([^/]+)$/);
     const incomeMatch = pathname.match(/^\/api\/incomes\/([^/]+)$/);
-    const ok = () => json(res, 200, loadFinance(db()));
+    const ok = () => {
+      if (req.method !== 'GET') dailyBackup(db(), BACKUP_DIR);
+      return json(res, 200, loadFinance(db()));
+    };
 
     try {
+      if (!isSameOrigin(req)) throw new FinanceError('Cross-origin request refused', 403);
       if (pathname === '/api/data' && req.method === 'GET') return ok();
 
       if (pathname === '/api/export' && req.method === 'GET') {

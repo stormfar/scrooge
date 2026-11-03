@@ -108,6 +108,15 @@ export interface Account {
   /** Money you could take out now without heavy tax or penalties. A pension policy usually is not. */
   accessible: boolean;
   /**
+   * Not accessible: the age from which it can be drawn in retirement. Null uses the default for the type
+   * (62 for pension policies, otherwise the regular pension age).
+   */
+  unlockAge: number | null;
+  /** How much of today's balance you paid in (for tax on gains). Null: assume no gains yet. */
+  costBasis: number | null;
+  /** Overrides the default tax on withdrawals for this type, in percent (see WITHDRAWAL_TAX). */
+  withdrawalTaxPct: number | null;
+  /**
    * What went in each month in the past, oldest first. Once there is any, months it does not cover count as
    * paused. Projections still use monthlyContribution and its increase; this only describes the past.
    */
@@ -225,6 +234,9 @@ export interface AccountWrite {
   portionDate?: string | null;
   portionSelf?: number | null;
   accessible?: boolean;
+  unlockAge?: number | null;
+  costBasis?: number | null;
+  withdrawalTaxPct?: number | null;
   /** Replaces the whole history when given. */
   contributionHistory?: ContributionPeriod[];
   balance?: number;
@@ -268,6 +280,53 @@ export const DEFAULT_SETTINGS: FinanceSettings = {
 
 /** Types that are usually locked until retirement. New accounts of these types start as not accessible. */
 export const LOCKED_TYPES: readonly AccountType[] = ['bav', 'riester', 'private_pension'];
+
+/** Earliest payout age for German pension policies (bAV, Riester, Rürup, private Rentenversicherung since 2012). */
+export const PENSION_UNLOCK_AGE = 62;
+
+/** When a not-accessible account can be drawn in retirement, or null when it can be drawn any time. */
+export function unlockAgeOf(
+  account: { type: AccountType; accessible: boolean; unlockAge: number | null },
+  regularPensionAge: number,
+): number | null {
+  if (account.accessible) return null;
+  if (account.unlockAge != null) return account.unlockAge;
+  return LOCKED_TYPES.includes(account.type) ? PENSION_UNLOCK_AGE : regularPensionAge;
+}
+
+export type WithdrawalTaxKind = 'gains' | 'payout' | 'none';
+
+/**
+ * Rough German tax on money taken out in retirement. Override per account when you know better.
+ * - gains: Abgeltungsteuer + Soli (26.375%) on the growth part only; equity ETFs get 30% Teilfreistellung (18.46%).
+ *   The Sparerpauschbetrag (€1,000 a person a year) is applied on top. Church tax is not included.
+ * - payout: a share of the whole payout (income tax plus health and care insurance on bAV/Riester payouts).
+ * - none: crypto held over a year, property held over ten years, cash.
+ * Private pension insurance taken as a lump sum after 62 (and 12 years) taxes half the gain at your income
+ * tax rate: about 15% of the gain at a 30% rate.
+ */
+export const WITHDRAWAL_TAX: Record<AccountType, { kind: WithdrawalTaxKind; pct: number }> = {
+  etf: { kind: 'gains', pct: 18.46 },
+  stocks: { kind: 'gains', pct: 26.375 },
+  savings: { kind: 'gains', pct: 26.375 },
+  fixed_term: { kind: 'gains', pct: 26.375 },
+  crypto: { kind: 'none', pct: 0 },
+  bav: { kind: 'payout', pct: 25 },
+  riester: { kind: 'payout', pct: 20 },
+  private_pension: { kind: 'gains', pct: 15 },
+  real_estate: { kind: 'none', pct: 0 },
+  cash: { kind: 'none', pct: 0 },
+  other: { kind: 'gains', pct: 26.375 },
+};
+
+export function withdrawalTaxOf(account: { type: AccountType; withdrawalTaxPct: number | null }): { kind: WithdrawalTaxKind; pct: number } {
+  const base = WITHDRAWAL_TAX[account.type] ?? WITHDRAWAL_TAX.other;
+  if (account.withdrawalTaxPct == null) return base;
+  return { kind: base.kind === 'none' ? 'gains' : base.kind, pct: account.withdrawalTaxPct };
+}
+
+/** Tax-free capital gains per person per year (Sparerpauschbetrag). */
+export const SAVER_ALLOWANCE = 1000;
 
 export function accountTypeInfo(type: AccountType) {
   return ACCOUNT_TYPES.find((t) => t.id === type) ?? ACCOUNT_TYPES[ACCOUNT_TYPES.length - 1];
