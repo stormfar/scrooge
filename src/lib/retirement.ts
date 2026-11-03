@@ -397,6 +397,8 @@ function simulate(req: SolveRequest, people: RetirementPersonInput[], stopOffset
     return paid == null ? Math.max(0, account.balance) : Math.max(0, paid);
   });
   const allowanceAnnual = Math.max(0, req.taxAllowanceAnnual ?? 0);
+  const rates = state.map(() => 0);
+  const increases = state.map((account) => increaseFrom(account));
   let allowanceLeft = allowanceAnnual;
 
   const incomeAccounts = accounts.filter((account) => {
@@ -513,14 +515,19 @@ function simulate(req: SolveRequest, people: RetirementPersonInput[], stopOffset
     const money = monthMoney(yearOffset);
     const { spending, pension } = money;
     const working = yearOffset < stopOffset - 1e-9;
-    if (month % 12 === 0) allowanceLeft = allowanceAnnual;
-    const year = Math.floor(month / 12);
+    if (month % 12 === 0) {
+      allowanceLeft = allowanceAnnual;
+      // Returns change once a year, so the monthly rate is worked out once a year.
+      const year = month / 12;
+      state.forEach((account, i) => {
+        rates[i] = monthlyRate(opts.returns ? opts.returns(i, year, account.annualReturnPct, meta[i].risk) : account.annualReturnPct);
+      });
+    }
     state.forEach((account, i) => {
       const contribution = working && !account.closed
-        ? grownMonthly(account.monthlyContribution, increaseFrom(account), month)
+        ? grownMonthly(account.monthlyContribution, increases[i], month)
         : 0;
-      const annual = opts.returns ? opts.returns(i, year, account.annualReturnPct, meta[i].risk) : account.annualReturnPct;
-      account.balance = account.balance * (1 + monthlyRate(annual)) + contribution;
+      account.balance = account.balance * (1 + rates[i]) + contribution;
       basis[i] += contribution;
     });
     const need = working ? 0 : Math.max(0, spending - pension);
